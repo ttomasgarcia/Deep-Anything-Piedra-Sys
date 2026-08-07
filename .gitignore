@@ -1,0 +1,16 @@
+# entorno / dependencias
+venv/
+repo/                 # clon de ByteDance/Depth-Anything-3 (lo baja setup.sh)
+__pycache__/
+*.pyc
+
+# salidas / temporales
+runs/
+server.log
+*.mp4
+*.mov
+*.webm
+.DS_Store
+
+# caches de modelos
+.cache/

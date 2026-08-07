@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Depth Anything 3 — Z-Depth local</title>
+<style>
+  :root{ --bg:#0d0f13; --card:#161a20; --line:#252b34; --fg:#e7ecf2; --mut:#8b95a3; --acc:#5b8cff; }
+  *{ box-sizing:border-box }
+  body{ margin:0; font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+        background:var(--bg); color:var(--fg); display:flex; justify-content:center; padding:40px 16px }
+  .wrap{ width:100%; max-width:640px }
+  h1{ font-size:22px; margin:0 0 2px }
+  .sub{ color:var(--mut); margin:0 0 24px; font-size:13px }
+  .card{ background:var(--card); border:1px solid var(--line); border-radius:14px; padding:22px; margin-bottom:16px }
+  label{ display:block; font-size:12px; color:var(--mut); margin:14px 0 6px; text-transform:uppercase; letter-spacing:.04em }
+  input[type=file]{ width:100% }
+  .drop{ border:1.5px dashed var(--line); border-radius:12px; padding:26px; text-align:center; cursor:pointer; transition:.15s }
+  .drop:hover,.drop.over{ border-color:var(--acc); background:#1a2130 }
+  .drop small{ color:var(--mut) }
+  select,input[type=number]{ width:100%; background:#0f1319; border:1px solid var(--line); color:var(--fg);
+        border-radius:9px; padding:9px 10px; font-size:14px }
+  .row{ display:flex; gap:12px } .row>div{ flex:1 }
+  .check{ display:flex; align-items:center; gap:8px; margin-top:16px; color:var(--fg) }
+  .check input{ width:16px; height:16px }
+  button{ width:100%; margin-top:22px; background:var(--acc); color:#fff; border:0; border-radius:10px;
+        padding:13px; font-size:15px; font-weight:600; cursor:pointer }
+  button:disabled{ opacity:.5; cursor:default }
+  .bar{ height:8px; background:#0f1319; border-radius:99px; overflow:hidden; margin:14px 0 8px }
+  .bar>i{ display:block; height:100%; width:0; background:var(--acc); transition:width .3s }
+  .stat{ font-size:13px; color:var(--mut) }
+  video{ width:100%; border-radius:10px; margin-top:14px; background:#000 }
+  a.dl{ display:inline-block; margin-top:12px; color:var(--acc); text-decoration:none; font-weight:600 }
+  .err{ color:#ff6b6b; font-size:13px; white-space:pre-wrap }
+  .hidden{ display:none }
+  .pill{ font-size:11px; color:var(--mut); border:1px solid var(--line); border-radius:99px; padding:3px 9px; display:inline-block }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Z-Depth · Depth Anything 3</h1>
+  <p class="sub">Subí un video y obtené el mapa de profundidad (z-depth) frame a frame. Corre local en tu Mac (MPS).</p>
+
+  <div class="card">
+    <span class="pill" id="modelPill">modelo: …</span>
+
+    <div class="drop" id="drop">
+      <div id="dropText"><strong>Arrastrá un video</strong> o hacé click<br><small>mp4, mov, webm…</small></div>
+      <input type="file" id="file" accept="video/*" class="hidden">
+    </div>
+
+    <div class="row">
+      <div>
+        <label>Resolución de proceso</label>
+        <select id="process_res">
+          <option value="336">336 · rápido</option>
+          <option value="504" selected>504 · recomendado</option>
+          <option value="672">672 · detalle (lento)</option>
+        </select>
+      </div>
+      <div>
+        <label>FPS de salida (0 = original)</label>
+        <input type="number" id="target_fps" value="0" min="0" step="1">
+      </div>
+    </div>
+
+    <label>Estilo de salida</label>
+    <select id="colormap">
+      <option value="gray" selected>Grises (z-depth para compositing)</option>
+      <option value="turbo">Turbo (color, preview)</option>
+      <option value="magma">Magma (color, preview)</option>
+    </select>
+
+    <label class="check"><input type="checkbox" id="invert" checked> Cerca = blanco (invertir)</label>
+
+    <button id="go" disabled>Procesar</button>
+  </div>
+
+  <div class="card hidden" id="progCard">
+    <div class="stat" id="statMsg">…</div>
+    <div class="bar"><i id="barFill"></i></div>
+    <div class="stat" id="statCount"></div>
+    <div class="err hidden" id="errBox"></div>
+  </div>
+
+  <div class="card hidden" id="resCard">
+    <strong>Resultado</strong>
+    <video id="resVideo" controls autoplay loop muted></video>
+    <a class="dl" id="dlLink" download>⬇ Descargar depth.mp4</a>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+let file = null, poll = null;
+
+// estado modelo
+async function pingModel(){
+  try{ const m = await (await fetch('/api/model')).json();
+    $('#modelPill').textContent = 'modelo: ' + m.message; }catch(e){}
+}
+pingModel(); setInterval(pingModel, 4000);
+
+// drag & drop
+const drop = $('#drop'), input = $('#file');
+drop.onclick = () => input.click();
+drop.ondragover = e => { e.preventDefault(); drop.classList.add('over'); };
+drop.ondragleave = () => drop.classList.remove('over');
+drop.ondrop = e => { e.preventDefault(); drop.classList.remove('over');
+  if(e.dataTransfer.files[0]) setFile(e.dataTransfer.files[0]); };
+input.onchange = () => input.files[0] && setFile(input.files[0]);
+function setFile(f){ file = f; $('#dropText').innerHTML =
+  '<strong>'+f.name+'</strong><br><small>'+(f.size/1e6).toFixed(1)+' MB</small>';
+  $('#go').disabled = false; }
+
+// enviar
+$('#go').onclick = async () => {
+  if(!file) return;
+  $('#go').disabled = true;
+  $('#resCard').classList.add('hidden');
+  $('#progCard').classList.remove('hidden');
+  $('#errBox').classList.add('hidden');
+  const fd = new FormData();
+  fd.append('video', file);
+  fd.append('process_res', $('#process_res').value);
+  fd.append('target_fps', $('#target_fps').value);
+  fd.append('invert', $('#invert').checked);
+  fd.append('colormap', $('#colormap').value);
+  try{
+    const r = await fetch('/api/jobs', {method:'POST', body:fd});
+    if(!r.ok) throw new Error(await r.text());
+    const {job_id} = await r.json();
+    poll = setInterval(() => checkJob(job_id), 800);
+  }catch(e){ showErr(e.message); $('#go').disabled=false; }
+};
+
+async function checkJob(id){
+  const j = await (await fetch('/api/jobs/'+id)).json();
+  $('#statMsg').textContent = j.message || j.status;
+  const pct = j.total ? Math.round(100*j.done/j.total) : (j.status==='done'?100:5);
+  $('#barFill').style.width = pct + '%';
+  $('#statCount').textContent = j.total ? (j.done+' / '+j.total+' frames') : '';
+  if(j.status === 'done'){
+    clearInterval(poll); $('#go').disabled=false;
+    const url = '/api/jobs/'+id+'/result';
+    $('#resVideo').src = url; $('#dlLink').href = url;
+    $('#resCard').classList.remove('hidden');
+  } else if(j.status === 'error'){
+    clearInterval(poll); $('#go').disabled=false; showErr(j.error||j.message);
+  }
+}
+function showErr(m){ $('#errBox').textContent = m; $('#errBox').classList.remove('hidden'); }
+</script>
+</body>
+</html>

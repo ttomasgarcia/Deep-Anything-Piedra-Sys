@@ -1,0 +1,33 @@
+# Dependencias de la web app (Apple Silicon / MPS).
+# torch y torchvision se instalan aparte en setup.sh (wheel con soporte MPS).
+# NOTA: xformers NO se incluye a propósito — no compila en Mac y el modelo
+# tiene fallback a PyTorch puro (scaled_dot_product_attention).
+
+# numpy debe ser <2; estas versiones de scipy/plyfile son las compatibles.
+numpy<2
+scipy==1.12.0
+plyfile==1.0.3
+
+einops
+huggingface_hub
+safetensors
+opencv-python
+pillow
+pillow-heif
+omegaconf
+imageio
+trimesh
+typer
+requests
+jaxtyping
+addict
+matplotlib
+moviepy==1.0.3
+pycolmap
+evo
+e3nn
+
+# servidor web
+fastapi
+uvicorn[standard]
+python-multipart
