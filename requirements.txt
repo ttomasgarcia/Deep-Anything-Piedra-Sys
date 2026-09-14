@@ -27,6 +27,11 @@ pycolmap
 evo
 e3nn
 
+# estimación de pose (cuerpo + manos + cara) — Holistic clásico.
+# 0.10.x usa la API 'solutions' (CPU, estable en Apple Silicon); la 1.x
+# crashea en el delegado Metal en Mac. Los modelos vienen en el wheel.
+mediapipe==0.10.14
+
 # servidor web
 fastapi
 uvicorn[standard]

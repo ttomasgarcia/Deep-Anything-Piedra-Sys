@@ -49,13 +49,28 @@
       <input type="file" id="file" accept="video/*" class="hidden">
     </div>
 
+    <label>Modo</label>
+    <select id="mode">
+      <option value="depth" selected>Solo z-depth</option>
+      <option value="depth_pose">z-depth + pose encima (cuerpo + manos)</option>
+      <option value="pose">Solo pose (sobre el video original)</option>
+    </select>
+
     <div class="row">
-      <div>
-        <label>Resolución de proceso</label>
+      <div id="resWrap">
+        <label>Resolución de proceso (depth)</label>
         <select id="process_res">
           <option value="336">336 · rápido</option>
           <option value="504" selected>504 · recomendado</option>
           <option value="672">672 · detalle (lento)</option>
+        </select>
+      </div>
+      <div id="poseQWrap" class="hidden">
+        <label>Calidad de pose</label>
+        <select id="pose_complexity">
+          <option value="0">Rápida</option>
+          <option value="1" selected>Balance</option>
+          <option value="2">Precisa (lento)</option>
         </select>
       </div>
       <div>
@@ -64,14 +79,19 @@
       </div>
     </div>
 
-    <label>Estilo de salida</label>
-    <select id="colormap">
-      <option value="gray" selected>Grises (z-depth para compositing)</option>
-      <option value="turbo">Turbo (color, preview)</option>
-      <option value="magma">Magma (color, preview)</option>
-    </select>
+    <div id="depthOpts">
+      <label>Estilo de salida (depth)</label>
+      <select id="colormap">
+        <option value="gray" selected>Grises (z-depth para compositing)</option>
+        <option value="turbo">Turbo (color, preview)</option>
+        <option value="magma">Magma (color, preview)</option>
+      </select>
+      <label class="check"><input type="checkbox" id="invert" checked> Cerca = blanco (invertir)</label>
+    </div>
 
-    <label class="check"><input type="checkbox" id="invert" checked> Cerca = blanco (invertir)</label>
+    <div id="poseOpts" class="hidden">
+      <label class="check"><input type="checkbox" id="draw_face"> Incluir malla de la cara</label>
+    </div>
 
     <button id="go" disabled>Procesar</button>
   </div>
@@ -86,13 +106,26 @@
   <div class="card hidden" id="resCard">
     <strong>Resultado</strong>
     <video id="resVideo" controls autoplay loop muted></video>
-    <a class="dl" id="dlLink" download>⬇ Descargar depth.mp4</a>
+    <a class="dl" id="dlLink" download>⬇ Descargar video</a>
   </div>
 </div>
 
 <script>
 const $ = s => document.querySelector(s);
 let file = null, poll = null;
+
+// toggle de opciones según modo
+const modeSel = $('#mode');
+function syncMode(){
+  const m = modeSel.value;
+  const needDepth = (m === 'depth' || m === 'depth_pose');
+  const needPose  = (m === 'depth_pose' || m === 'pose');
+  $('#resWrap').classList.toggle('hidden', !needDepth);
+  $('#depthOpts').classList.toggle('hidden', !needDepth);
+  $('#poseQWrap').classList.toggle('hidden', !needPose);
+  $('#poseOpts').classList.toggle('hidden', !needPose);
+}
+modeSel.onchange = syncMode; syncMode();
 
 // estado modelo
 async function pingModel(){
@@ -122,10 +155,13 @@ $('#go').onclick = async () => {
   $('#errBox').classList.add('hidden');
   const fd = new FormData();
   fd.append('video', file);
+  fd.append('mode', $('#mode').value);
   fd.append('process_res', $('#process_res').value);
   fd.append('target_fps', $('#target_fps').value);
   fd.append('invert', $('#invert').checked);
   fd.append('colormap', $('#colormap').value);
+  fd.append('pose_complexity', $('#pose_complexity').value);
+  fd.append('draw_face', $('#draw_face').checked);
   try{
     const r = await fetch('/api/jobs', {method:'POST', body:fd});
     if(!r.ok) throw new Error(await r.text());

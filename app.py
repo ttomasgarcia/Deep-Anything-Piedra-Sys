@@ -24,6 +24,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from depth_anything_3.api import DepthAnything3
+import pose as pose_mod
 
 # ----------------------------------------------------------------------------
 BASE = Path(__file__).parent
@@ -122,9 +123,11 @@ def extract_frames(video_path: Path, target_fps: float | None):
 
 
 def run_job(jid, video_path: Path, opts: dict):
+    estimator = None
     try:
-        upd(jid, status="loading_model", message="preparando modelo…")
-        model = get_model()
+        mode = opts.get("mode", "depth")          # depth | depth_pose | pose
+        need_depth = mode in ("depth", "depth_pose")
+        need_pose = mode in ("depth_pose", "pose")
 
         upd(jid, status="extracting", message="extrayendo frames…")
         frames, out_fps, (W, H) = extract_frames(video_path, opts.get("target_fps"))
@@ -136,46 +139,68 @@ def run_job(jid, video_path: Path, opts: dict):
         process_res = int(opts.get("process_res", 504))
         invert = bool(opts.get("invert", True))
         colormap = opts.get("colormap", "gray")
+        draw_face = bool(opts.get("draw_face", False))
 
-        raw_depths = []  # depth crudo por frame (a resolución de proceso)
+        model = None
+        if need_depth:
+            upd(jid, status="loading_model", message="preparando modelo de depth…")
+            model = get_model()
+        if need_pose:
+            estimator = pose_mod.PoseEstimator(complexity=int(opts.get("pose_complexity", 1)))
+
+        raw_depths = []          # depth crudo por frame (resolución de proceso)
+        pose_frames = []         # landmarks por frame
         upd(jid, status="inferring")
         for idx, fr in enumerate(frames):
-            with _model_lock:
-                with torch.no_grad():
-                    pred = model.inference(
-                        [Image.fromarray(fr)],
-                        process_res=process_res,
-                        export_format="mini_npz",
-                        export_dir=None,
-                    )
-            raw_depths.append(pred.depth[0].astype(np.float32))
-            upd(jid, done=idx + 1,
-                message=f"inferencia {idx+1}/{n}")
+            if need_depth:
+                with _model_lock:
+                    with torch.no_grad():
+                        pred = model.inference(
+                            [Image.fromarray(fr)],
+                            process_res=process_res,
+                            export_format="mini_npz",
+                            export_dir=None,
+                        )
+                raw_depths.append(pred.depth[0].astype(np.float32))
+            if need_pose:
+                pose_frames.append(estimator.detect(fr))
+            upd(jid, done=idx + 1, message=f"procesando {idx+1}/{n}")
 
-        # Normalización global (rango consistente en todo el clip -> menos flicker)
-        upd(jid, status="encoding", message="normalizando y codificando…")
-        allv = np.concatenate([d.ravel() for d in raw_depths])
-        lo = float(np.percentile(allv, 1))
-        hi = float(np.percentile(allv, 99))
-        rng = (hi - lo) or 1e-6
+        # Normalización global del depth (rango consistente -> menos flicker)
+        lo = hi = rng = None
+        if need_depth:
+            allv = np.concatenate([d.ravel() for d in raw_depths])
+            lo = float(np.percentile(allv, 1))
+            hi = float(np.percentile(allv, 99))
+            rng = (hi - lo) or 1e-6
 
+        upd(jid, status="encoding", message="componiendo y codificando…")
         frames_dir = RUNS / jid / "frames"
         frames_dir.mkdir(parents=True, exist_ok=True)
-        for idx, d in enumerate(raw_depths):
-            nrm = np.clip((d - lo) / rng, 0, 1)
-            if invert:
-                nrm = 1.0 - nrm  # cerca = claro
-            g = (nrm * 255).astype(np.uint8)
-            g = cv2.resize(g, (W, H), interpolation=cv2.INTER_CUBIC)
-            if colormap == "turbo":
-                img = cv2.applyColorMap(g, cv2.COLORMAP_TURBO)  # BGR
-            elif colormap == "magma":
-                img = cv2.applyColorMap(g, cv2.COLORMAP_MAGMA)
+        for idx in range(n):
+            # --- imagen base (BGR) ---
+            if need_depth:
+                nrm = np.clip((raw_depths[idx] - lo) / rng, 0, 1)
+                if invert:
+                    nrm = 1.0 - nrm            # cerca = claro
+                g = (nrm * 255).astype(np.uint8)
+                g = cv2.resize(g, (W, H), interpolation=cv2.INTER_CUBIC)
+                if colormap == "turbo":
+                    base = cv2.applyColorMap(g, cv2.COLORMAP_TURBO)
+                elif colormap == "magma":
+                    base = cv2.applyColorMap(g, cv2.COLORMAP_MAGMA)
+                else:
+                    base = cv2.cvtColor(g, cv2.COLOR_GRAY2BGR)
             else:
-                img = cv2.cvtColor(g, cv2.COLOR_GRAY2BGR)
-            cv2.imwrite(str(frames_dir / f"f_{idx:06d}.png"), img)
+                base = cv2.cvtColor(frames[idx], cv2.COLOR_RGB2BGR)  # video original
 
-        out_path = RUNS / jid / "depth.mp4"
+            # --- overlay de pose ---
+            if need_pose:
+                pose_mod.draw(base, pose_frames[idx], draw_face=draw_face)
+
+            cv2.imwrite(str(frames_dir / f"f_{idx:06d}.png"), base)
+
+        out_path = RUNS / jid / "output.mp4"
         cmd = [
             FFMPEG, "-y", "-framerate", f"{out_fps:.6f}",
             "-i", str(frames_dir / "f_%06d.png"),
@@ -193,6 +218,9 @@ def run_job(jid, video_path: Path, opts: dict):
         upd(jid, status="error", error=str(e),
             message="error: " + str(e))
         traceback.print_exc()
+    finally:
+        if estimator is not None:
+            estimator.close()
 
 
 # ----------------------------------------------------------------------------
@@ -212,13 +240,18 @@ def model_status():
 @app.post("/api/jobs")
 async def create_job(
     video: UploadFile = File(...),
+    mode: str = Form("depth"),              # depth | depth_pose | pose
     process_res: int = Form(504),
     target_fps: float = Form(0),
     invert: bool = Form(True),
     colormap: str = Form("gray"),
+    pose_complexity: int = Form(1),
+    draw_face: bool = Form(False),
 ):
     if not video.filename:
         raise HTTPException(400, "Falta el archivo de video.")
+    if mode not in ("depth", "depth_pose", "pose"):
+        raise HTTPException(400, "modo inválido")
     jid = new_job()
     job_dir = RUNS / jid
     job_dir.mkdir(parents=True, exist_ok=True)
@@ -227,10 +260,13 @@ async def create_job(
         shutil.copyfileobj(video.file, f)
 
     opts = {
+        "mode": mode,
         "process_res": process_res,
         "target_fps": target_fps if target_fps and target_fps > 0 else None,
         "invert": invert,
         "colormap": colormap,
+        "pose_complexity": pose_complexity,
+        "draw_face": draw_face,
     }
     threading.Thread(target=run_job, args=(jid, vpath, opts), daemon=True).start()
     return {"job_id": jid}
@@ -251,7 +287,7 @@ def job_result(jid: str):
         j = JOBS.get(jid)
     if not j or not j.get("out"):
         raise HTTPException(404, "resultado no disponible")
-    return FileResponse(j["out"], media_type="video/mp4", filename=f"depth_{jid}.mp4")
+    return FileResponse(j["out"], media_type="video/mp4", filename=f"output_{jid}.mp4")
 
 
 if __name__ == "__main__":
