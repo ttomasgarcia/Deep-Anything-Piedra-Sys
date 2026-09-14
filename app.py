@@ -204,6 +204,13 @@ def run_job(jid, video_path: Path, opts: dict):
         cmd = [
             FFMPEG, "-y", "-framerate", f"{out_fps:.6f}",
             "-i", str(frames_dir / "f_%06d.png"),
+        ]
+        if opts.get("include_audio"):
+            # segundo input = video original; se toma sólo su audio (opcional con ?)
+            cmd += ["-i", str(video_path),
+                    "-map", "0:v", "-map", "1:a?",
+                    "-c:a", "aac", "-b:a", "192k", "-shortest"]
+        cmd += [
             "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "17",
             "-movflags", "+faststart", str(out_path),
         ]
@@ -247,6 +254,7 @@ async def create_job(
     colormap: str = Form("gray"),
     pose_complexity: int = Form(1),
     draw_face: bool = Form(False),
+    include_audio: bool = Form(False),
 ):
     if not video.filename:
         raise HTTPException(400, "Falta el archivo de video.")
@@ -267,6 +275,7 @@ async def create_job(
         "colormap": colormap,
         "pose_complexity": pose_complexity,
         "draw_face": draw_face,
+        "include_audio": include_audio,
     }
     threading.Thread(target=run_job, args=(jid, vpath, opts), daemon=True).start()
     return {"job_id": jid}

@@ -93,6 +93,8 @@
       <label class="check"><input type="checkbox" id="draw_face"> Incluir malla de la cara</label>
     </div>
 
+    <label class="check"><input type="checkbox" id="include_audio"> Incluir el audio del video original</label>
+
     <button id="go" disabled>Procesar</button>
   </div>
 
@@ -162,6 +164,7 @@ $('#go').onclick = async () => {
   fd.append('colormap', $('#colormap').value);
   fd.append('pose_complexity', $('#pose_complexity').value);
   fd.append('draw_face', $('#draw_face').checked);
+  fd.append('include_audio', $('#include_audio').checked);
   try{
     const r = await fetch('/api/jobs', {method:'POST', body:fd});
     if(!r.ok) throw new Error(await r.text());
