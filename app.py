@@ -20,7 +20,7 @@ import numpy as np
 import torch
 from PIL import Image
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from depth_anything_3.api import DepthAnything3
@@ -120,6 +120,75 @@ def extract_frames(video_path: Path, target_fps: float | None):
         i += 1
     cap.release()
     return frames, out_fps, (W, H)
+
+
+def grab_frame(video_path: Path, frac: float):
+    """Devuelve (frame_RGB uint8, idx, total) del frame en la posición frac (0..1)."""
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError("No se pudo abrir el video.")
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+    idx = int(round((total - 1) * max(0.0, min(1.0, frac)))) if total > 0 else 0
+    if total > 0:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+    ok, frame = cap.read()
+    if not ok:  # fallback: reabrir y leer el primero
+        cap.release()
+        cap = cv2.VideoCapture(str(video_path))
+        ok, frame = cap.read()
+        idx = 0
+    cap.release()
+    if not ok:
+        raise RuntimeError("No se pudo leer un frame del video.")
+    return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), idx, total
+
+
+def depth_to_bgr(d, W, H, invert, colormap, lo, hi):
+    """d: depth crudo (h,w). Devuelve imagen BGR normalizada + coloreada a WxH."""
+    rng = (hi - lo) or 1e-6
+    nrm = np.clip((d - lo) / rng, 0, 1)
+    if invert:
+        nrm = 1.0 - nrm            # cerca = claro
+    g = (nrm * 255).astype(np.uint8)
+    g = cv2.resize(g, (W, H), interpolation=cv2.INTER_CUBIC)
+    if colormap == "turbo":
+        return cv2.applyColorMap(g, cv2.COLORMAP_TURBO)
+    if colormap == "magma":
+        return cv2.applyColorMap(g, cv2.COLORMAP_MAGMA)
+    return cv2.cvtColor(g, cv2.COLOR_GRAY2BGR)
+
+
+def render_single(frame_rgb, opts):
+    """Procesa UN frame (depth/pose según modo) y devuelve imagen BGR. Para el preview."""
+    mode = opts.get("mode", "depth")
+    need_depth = mode in ("depth", "depth_pose")
+    need_pose = mode in ("depth_pose", "pose")
+    H, W = frame_rgb.shape[:2]
+
+    if need_depth:
+        model = get_model()
+        with _model_lock:
+            with torch.no_grad():
+                pred = model.inference(
+                    [Image.fromarray(frame_rgb)],
+                    process_res=int(opts.get("process_res", 504)),
+                    export_format="mini_npz", export_dir=None,
+                )
+        d = pred.depth[0].astype(np.float32)
+        lo = float(np.percentile(d, 1))
+        hi = float(np.percentile(d, 99))
+        base = depth_to_bgr(d, W, H, bool(opts.get("invert", True)),
+                            opts.get("colormap", "gray"), lo, hi)
+    else:
+        base = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+
+    if need_pose:
+        est = pose_mod.PoseEstimator(complexity=int(opts.get("pose_complexity", 1)))
+        try:
+            pose_mod.draw(base, est.detect(frame_rgb), draw_face=bool(opts.get("draw_face", False)))
+        finally:
+            est.close()
+    return base
 
 
 def run_job(jid, video_path: Path, opts: dict):
@@ -242,6 +311,40 @@ def index():
 @app.get("/api/model")
 def model_status():
     return _model_state
+
+
+@app.post("/api/preview")
+async def preview(
+    video: UploadFile = File(...),
+    mode: str = Form("depth"),
+    position: float = Form(0.5),            # 0..1 posición del frame
+    process_res: int = Form(504),
+    invert: bool = Form(True),
+    colormap: str = Form("gray"),
+    pose_complexity: int = Form(1),
+    draw_face: bool = Form(False),
+):
+    if not video.filename:
+        raise HTTPException(400, "Falta el archivo de video.")
+    if mode not in ("depth", "depth_pose", "pose"):
+        raise HTTPException(400, "modo inválido")
+    tmp_dir = RUNS / ("preview_" + uuid.uuid4().hex[:8])
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        vpath = tmp_dir / ("input" + Path(video.filename).suffix)
+        with open(vpath, "wb") as f:
+            shutil.copyfileobj(video.file, f)
+        frame_rgb, idx, total = grab_frame(vpath, position)
+        opts = dict(mode=mode, process_res=process_res, invert=invert,
+                    colormap=colormap, pose_complexity=pose_complexity, draw_face=draw_face)
+        bgr = render_single(frame_rgb, opts)
+        ok, buf = cv2.imencode(".png", bgr)
+        if not ok:
+            raise RuntimeError("no se pudo codificar el PNG")
+        headers = {"x-frame": str(idx), "x-total": str(total)}
+        return Response(content=buf.tobytes(), media_type="image/png", headers=headers)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 @app.post("/api/jobs")

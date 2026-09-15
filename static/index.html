@@ -23,9 +23,13 @@
   .row{ display:flex; gap:12px } .row>div{ flex:1 }
   .check{ display:flex; align-items:center; gap:8px; margin-top:16px; color:var(--fg) }
   .check input{ width:16px; height:16px }
-  button{ width:100%; margin-top:22px; background:var(--acc); color:#fff; border:0; border-radius:10px;
+  button{ flex:1; background:var(--acc); color:#fff; border:0; border-radius:10px;
         padding:13px; font-size:15px; font-weight:600; cursor:pointer }
   button:disabled{ opacity:.5; cursor:default }
+  button.ghost{ background:transparent; color:var(--fg); border:1px solid var(--line) }
+  .btnRow{ display:flex; gap:10px; margin-top:22px }
+  img.preview{ width:100%; border-radius:10px; margin-top:14px; background:#000 }
+  input[type=range]{ width:100%; accent-color:var(--acc) }
   .bar{ height:8px; background:#0f1319; border-radius:99px; overflow:hidden; margin:14px 0 8px }
   .bar>i{ display:block; height:100%; width:0; background:var(--acc); transition:width .3s }
   .stat{ font-size:13px; color:var(--mut) }
@@ -95,7 +99,13 @@
 
     <label class="check"><input type="checkbox" id="include_audio"> Incluir el audio del video original</label>
 
-    <button id="go" disabled>Procesar</button>
+    <label>Posición del preview: <span id="posVal">50%</span></label>
+    <input type="range" id="position" min="0" max="100" value="50" style="width:100%">
+
+    <div class="btnRow">
+      <button id="preview" class="ghost" disabled>👁 Preview (1 frame)</button>
+      <button id="go" disabled>Procesar video</button>
+    </div>
   </div>
 
   <div class="card hidden" id="progCard">
@@ -103,6 +113,13 @@
     <div class="bar"><i id="barFill"></i></div>
     <div class="stat" id="statCount"></div>
     <div class="err hidden" id="errBox"></div>
+  </div>
+
+  <div class="card hidden" id="previewCard">
+    <strong>Preview (frame <span id="pvFrame">–</span>)</strong>
+    <div class="stat" id="pvMsg"></div>
+    <img class="preview" id="pvImg" alt="preview">
+    <a class="dl" id="pvDl" download="preview.png">⬇ Descargar frame</a>
   </div>
 
   <div class="card hidden" id="resCard">
@@ -146,7 +163,45 @@ drop.ondrop = e => { e.preventDefault(); drop.classList.remove('over');
 input.onchange = () => input.files[0] && setFile(input.files[0]);
 function setFile(f){ file = f; $('#dropText').innerHTML =
   '<strong>'+f.name+'</strong><br><small>'+(f.size/1e6).toFixed(1)+' MB</small>';
-  $('#go').disabled = false; }
+  $('#go').disabled = false; $('#preview').disabled = false; }
+
+// slider de posición
+const posSlider = $('#position');
+posSlider.oninput = () => $('#posVal').textContent = posSlider.value + '%';
+
+// campos comunes a preview y proceso
+function commonFields(fd){
+  fd.append('mode', $('#mode').value);
+  fd.append('process_res', $('#process_res').value);
+  fd.append('invert', $('#invert').checked);
+  fd.append('colormap', $('#colormap').value);
+  fd.append('pose_complexity', $('#pose_complexity').value);
+  fd.append('draw_face', $('#draw_face').checked);
+}
+
+// PREVIEW (1 frame)
+$('#preview').onclick = async () => {
+  if(!file) return;
+  const btn = $('#preview'); btn.disabled = true; const orig = btn.textContent;
+  btn.textContent = '⏳ Procesando frame…';
+  $('#previewCard').classList.remove('hidden');
+  $('#pvMsg').textContent = 'corriendo el modelo…';
+  const fd = new FormData();
+  fd.append('video', file);
+  commonFields(fd);
+  fd.append('position', (posSlider.value/100).toString());
+  try{
+    const r = await fetch('/api/preview', {method:'POST', body:fd});
+    if(!r.ok) throw new Error(await r.text());
+    const idx = r.headers.get('x-frame'), tot = r.headers.get('x-total');
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    $('#pvImg').src = url; $('#pvDl').href = url;
+    $('#pvFrame').textContent = idx + (tot ? ' / ' + tot : '');
+    $('#pvMsg').textContent = '';
+  }catch(e){ $('#pvMsg').textContent = 'error: ' + e.message; }
+  finally{ btn.disabled = false; btn.textContent = orig; }
+};
 
 // enviar
 $('#go').onclick = async () => {
@@ -157,13 +212,8 @@ $('#go').onclick = async () => {
   $('#errBox').classList.add('hidden');
   const fd = new FormData();
   fd.append('video', file);
-  fd.append('mode', $('#mode').value);
-  fd.append('process_res', $('#process_res').value);
+  commonFields(fd);
   fd.append('target_fps', $('#target_fps').value);
-  fd.append('invert', $('#invert').checked);
-  fd.append('colormap', $('#colormap').value);
-  fd.append('pose_complexity', $('#pose_complexity').value);
-  fd.append('draw_face', $('#draw_face').checked);
   fd.append('include_audio', $('#include_audio').checked);
   try{
     const r = await fetch('/api/jobs', {method:'POST', body:fd});
