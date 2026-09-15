@@ -18,7 +18,11 @@ Corre **100% local en Apple Silicon** (Mac M-series) vía **MPS** — sin nube, 
   - **Solo pose** — esqueleto sobre el video original.
 - **Estimación de pose** (cuerpo 33 pts + 21 pts por mano, cara opcional) con
   [MediaPipe Holistic](https://github.com/google/mediapipe), corriendo en CPU.
+- **Realce de rostro**: detecta la cara y le da su propio rango de grises + micro-contraste
+  (CLAHE) sobre el depth crudo, para que no se vea plana ("como si no existiese").
+- **Preview de 1 frame** (con slider de posición) para chequear/compartir antes de procesar todo.
 - Salida de depth en **grises** (para compositing) o **color** (Turbo / Magma).
+- Opción de **incluir el audio** del video original.
 - Controles de resolución, FPS de salida, inversión y calidad de pose.
 - Normalización global del clip para reducir el *flicker* temporal.
 - Modelo de depth por defecto: `depth-anything/DA3MONO-LARGE` (monocular relativo, por frame).
@@ -74,11 +78,16 @@ Para clips largos, bajá la resolución y el FPS de salida.
 Es depth **relativo, no métrico**: la escala es arbitraria por frame, por lo que puede
 haber *flicker* / deriva entre frames (mitigado con normalización global, no eliminado).
 
+El **realce de rostro** revela el relieve que DA3 captura, pero DA3 es un modelo de escena
+y la profundidad de una cara es intrínsecamente suave. Para geometría facial fina y precisa
+el modelo adecuado es Sapiens (human-centric), no incluido acá.
+
 ## Estructura
 
 ```
-app.py              backend FastAPI (jobs + progreso + inferencia)
+app.py              backend FastAPI (jobs + progreso + inferencia + preview)
 pose.py             estimación de pose (MediaPipe Holistic)
+face.py             realce de detalle del rostro (MediaPipe Face Detection + CLAHE)
 static/index.html   interfaz web
 run.sh              arranca el servidor
 setup.sh            instala todo desde cero

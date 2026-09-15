@@ -25,6 +25,7 @@ from fastapi.staticfiles import StaticFiles
 
 from depth_anything_3.api import DepthAnything3
 import pose as pose_mod
+import face as face_mod
 
 # ----------------------------------------------------------------------------
 BASE = Path(__file__).parent
@@ -143,14 +144,17 @@ def grab_frame(video_path: Path, frac: float):
     return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), idx, total
 
 
-def depth_to_bgr(d, W, H, invert, colormap, lo, hi):
-    """d: depth crudo (h,w). Devuelve imagen BGR normalizada + coloreada a WxH."""
+def depth_normalize(d, W, H, lo, hi):
+    """d: depth crudo (h,w) -> normalizado 0..1 float a resolución WxH."""
     rng = (hi - lo) or 1e-6
-    nrm = np.clip((d - lo) / rng, 0, 1)
-    if invert:
-        nrm = 1.0 - nrm            # cerca = claro
-    g = (nrm * 255).astype(np.uint8)
-    g = cv2.resize(g, (W, H), interpolation=cv2.INTER_CUBIC)
+    nrm = np.clip((d - lo) / rng, 0, 1).astype(np.float32)
+    return cv2.resize(nrm, (W, H), interpolation=cv2.INTER_CUBIC)
+
+
+def norm_to_bgr(norm, invert, colormap):
+    """norm: 0..1 float (H,W) -> imagen BGR coloreada."""
+    n = 1.0 - norm if invert else norm       # cerca = claro
+    g = (np.clip(n, 0, 1) * 255).astype(np.uint8)
     if colormap == "turbo":
         return cv2.applyColorMap(g, cv2.COLORMAP_TURBO)
     if colormap == "magma":
@@ -177,8 +181,16 @@ def render_single(frame_rgb, opts):
         d = pred.depth[0].astype(np.float32)
         lo = float(np.percentile(d, 1))
         hi = float(np.percentile(d, 99))
-        base = depth_to_bgr(d, W, H, bool(opts.get("invert", True)),
-                            opts.get("colormap", "gray"), lo, hi)
+        norm = depth_normalize(d, W, H, lo, hi)
+        if opts.get("enhance_face"):
+            fdet = face_mod.FaceDetector()
+            try:
+                mask = face_mod.feather_mask(fdet.boxes(frame_rgb), W, H)
+            finally:
+                fdet.close()
+            raw_full = cv2.resize(d, (W, H), interpolation=cv2.INTER_CUBIC)
+            norm = face_mod.enhance(raw_full, norm, mask, strength=float(opts.get("face_strength", 1.0)))
+        base = norm_to_bgr(norm, bool(opts.get("invert", True)), opts.get("colormap", "gray"))
     else:
         base = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
 
@@ -193,6 +205,7 @@ def render_single(frame_rgb, opts):
 
 def run_job(jid, video_path: Path, opts: dict):
     estimator = None
+    face_det = None
     try:
         mode = opts.get("mode", "depth")          # depth | depth_pose | pose
         need_depth = mode in ("depth", "depth_pose")
@@ -209,6 +222,8 @@ def run_job(jid, video_path: Path, opts: dict):
         invert = bool(opts.get("invert", True))
         colormap = opts.get("colormap", "gray")
         draw_face = bool(opts.get("draw_face", False))
+        enhance_face = bool(opts.get("enhance_face", False)) and need_depth
+        face_strength = float(opts.get("face_strength", 1.0))
 
         model = None
         if need_depth:
@@ -216,9 +231,12 @@ def run_job(jid, video_path: Path, opts: dict):
             model = get_model()
         if need_pose:
             estimator = pose_mod.PoseEstimator(complexity=int(opts.get("pose_complexity", 1)))
+        if enhance_face:
+            face_det = face_mod.FaceDetector()
 
         raw_depths = []          # depth crudo por frame (resolución de proceso)
         pose_frames = []         # landmarks por frame
+        face_boxes = []          # cajas de rostro por frame
         upd(jid, status="inferring")
         for idx, fr in enumerate(frames):
             if need_depth:
@@ -233,6 +251,8 @@ def run_job(jid, video_path: Path, opts: dict):
                 raw_depths.append(pred.depth[0].astype(np.float32))
             if need_pose:
                 pose_frames.append(estimator.detect(fr))
+            if enhance_face:
+                face_boxes.append(face_det.boxes(fr))
             upd(jid, done=idx + 1, message=f"procesando {idx+1}/{n}")
 
         # Normalización global del depth (rango consistente -> menos flicker)
@@ -249,17 +269,12 @@ def run_job(jid, video_path: Path, opts: dict):
         for idx in range(n):
             # --- imagen base (BGR) ---
             if need_depth:
-                nrm = np.clip((raw_depths[idx] - lo) / rng, 0, 1)
-                if invert:
-                    nrm = 1.0 - nrm            # cerca = claro
-                g = (nrm * 255).astype(np.uint8)
-                g = cv2.resize(g, (W, H), interpolation=cv2.INTER_CUBIC)
-                if colormap == "turbo":
-                    base = cv2.applyColorMap(g, cv2.COLORMAP_TURBO)
-                elif colormap == "magma":
-                    base = cv2.applyColorMap(g, cv2.COLORMAP_MAGMA)
-                else:
-                    base = cv2.cvtColor(g, cv2.COLOR_GRAY2BGR)
+                norm = depth_normalize(raw_depths[idx], W, H, lo, hi)
+                if enhance_face:
+                    mask = face_mod.feather_mask(face_boxes[idx], W, H)
+                    raw_full = cv2.resize(raw_depths[idx], (W, H), interpolation=cv2.INTER_CUBIC)
+                    norm = face_mod.enhance(raw_full, norm, mask, strength=face_strength)
+                base = norm_to_bgr(norm, invert, colormap)
             else:
                 base = cv2.cvtColor(frames[idx], cv2.COLOR_RGB2BGR)  # video original
 
@@ -297,6 +312,8 @@ def run_job(jid, video_path: Path, opts: dict):
     finally:
         if estimator is not None:
             estimator.close()
+        if face_det is not None:
+            face_det.close()
 
 
 # ----------------------------------------------------------------------------
@@ -323,6 +340,8 @@ async def preview(
     colormap: str = Form("gray"),
     pose_complexity: int = Form(1),
     draw_face: bool = Form(False),
+    enhance_face: bool = Form(False),
+    face_strength: float = Form(1.0),
 ):
     if not video.filename:
         raise HTTPException(400, "Falta el archivo de video.")
@@ -336,7 +355,8 @@ async def preview(
             shutil.copyfileobj(video.file, f)
         frame_rgb, idx, total = grab_frame(vpath, position)
         opts = dict(mode=mode, process_res=process_res, invert=invert,
-                    colormap=colormap, pose_complexity=pose_complexity, draw_face=draw_face)
+                    colormap=colormap, pose_complexity=pose_complexity, draw_face=draw_face,
+                    enhance_face=enhance_face, face_strength=face_strength)
         bgr = render_single(frame_rgb, opts)
         ok, buf = cv2.imencode(".png", bgr)
         if not ok:
@@ -358,6 +378,8 @@ async def create_job(
     pose_complexity: int = Form(1),
     draw_face: bool = Form(False),
     include_audio: bool = Form(False),
+    enhance_face: bool = Form(False),
+    face_strength: float = Form(1.0),
 ):
     if not video.filename:
         raise HTTPException(400, "Falta el archivo de video.")
@@ -379,6 +401,8 @@ async def create_job(
         "pose_complexity": pose_complexity,
         "draw_face": draw_face,
         "include_audio": include_audio,
+        "enhance_face": enhance_face,
+        "face_strength": face_strength,
     }
     threading.Thread(target=run_job, args=(jid, vpath, opts), daemon=True).start()
     return {"job_id": jid}
