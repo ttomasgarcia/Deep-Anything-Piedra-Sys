@@ -91,7 +91,12 @@
         <option value="magma">Magma (color, preview)</option>
       </select>
       <label class="check"><input type="checkbox" id="invert" checked> Cerca = blanco (invertir)</label>
-      <label class="check"><input type="checkbox" id="enhance_face"> Realzar detalle del rostro (que no se vea plano)</label>
+      <label>Rostro</label>
+      <select id="face_mode">
+        <option value="off" selected>Normal</option>
+        <option value="enhance">Realzar detalle (que no se vea plano)</option>
+        <option value="flatten">Aplanar / ocultar (sin rasgos)</option>
+      </select>
       <div id="faceStrengthWrap" class="hidden">
         <label>Fuerza del realce: <span id="fsVal">100%</span></label>
         <input type="range" id="face_strength" min="20" max="250" value="100" style="width:100%">
@@ -174,9 +179,9 @@ function setFile(f){ file = f; $('#dropText').innerHTML =
 const posSlider = $('#position');
 posSlider.oninput = () => $('#posVal').textContent = posSlider.value + '%';
 
-// realce de rostro
-const enhChk = $('#enhance_face'), fsSlider = $('#face_strength');
-enhChk.onchange = () => $('#faceStrengthWrap').classList.toggle('hidden', !enhChk.checked);
+// rostro (normal / realzar / aplanar)
+const faceMode = $('#face_mode'), fsSlider = $('#face_strength');
+faceMode.onchange = () => $('#faceStrengthWrap').classList.toggle('hidden', faceMode.value !== 'enhance');
 fsSlider.oninput = () => $('#fsVal').textContent = fsSlider.value + '%';
 
 // campos comunes a preview y proceso
@@ -187,7 +192,7 @@ function commonFields(fd){
   fd.append('colormap', $('#colormap').value);
   fd.append('pose_complexity', $('#pose_complexity').value);
   fd.append('draw_face', $('#draw_face').checked);
-  fd.append('enhance_face', $('#enhance_face').checked);
+  fd.append('face_mode', $('#face_mode').value);
   fd.append('face_strength', ($('#face_strength').value/100).toString());
 }
 

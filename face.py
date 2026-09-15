@@ -51,6 +51,17 @@ def feather_mask(boxes, W, H, pad=0.35):
     return np.clip(m, 0, 1)
 
 
+def depth_gate(global_norm, mask, tol=0.22):
+    """Limita la máscara a píxeles con profundidad parecida a la del rostro,
+    para no derramar el efecto sobre el fondo (evita el halo)."""
+    core = mask > 0.5
+    if int(core.sum()) < 30:
+        return mask
+    m = float(np.median(global_norm[core]))
+    gate = np.clip(1.0 - np.abs(global_norm - m) / max(tol, 1e-3), 0.0, 1.0)
+    return mask * gate
+
+
 def enhance(raw_full, global_norm, mask, strength=1.0):
     """
     Le da al rostro su propio rango de grises usando el depth CRUDO (no el
@@ -79,5 +90,19 @@ def enhance(raw_full, global_norm, mask, strength=1.0):
     local = clahe.apply(g8).astype(np.float32) / 255.0
     band = float(np.clip(0.6 + 0.5 * strength, 0.3, 1.6))
     local = np.clip((local - 0.5) * band + 0.5, 0.0, 1.0)   # contraste global del rostro
-    # mezcla feather: adentro usa el relieve facial, afuera el depth normal
+    # mezcla feather (limitada al sujeto): adentro relieve facial, afuera depth normal
+    mask = depth_gate(global_norm, mask)
     return np.clip(global_norm * (1.0 - mask) + local * mask, 0.0, 1.0)
+
+
+def flatten(global_norm, mask, amount=1.0):
+    """
+    Aplana / oculta el rostro: reemplaza su relieve por un valor constante (la
+    mediana de profundidad del rostro), con feather. amount 0..1 = cuánto aplanar.
+    """
+    core = mask > 0.5
+    if int(core.sum()) < 30:
+        return global_norm
+    m = float(np.median(global_norm[core]))
+    w = depth_gate(global_norm, mask) * float(np.clip(amount, 0.0, 1.0))
+    return np.clip(global_norm * (1.0 - w) + m * w, 0.0, 1.0)

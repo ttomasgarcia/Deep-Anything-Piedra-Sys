@@ -182,14 +182,18 @@ def render_single(frame_rgb, opts):
         lo = float(np.percentile(d, 1))
         hi = float(np.percentile(d, 99))
         norm = depth_normalize(d, W, H, lo, hi)
-        if opts.get("enhance_face"):
+        face_mode = opts.get("face_mode", "off")
+        if face_mode in ("enhance", "flatten"):
             fdet = face_mod.FaceDetector()
             try:
                 mask = face_mod.feather_mask(fdet.boxes(frame_rgb), W, H)
             finally:
                 fdet.close()
-            raw_full = cv2.resize(d, (W, H), interpolation=cv2.INTER_CUBIC)
-            norm = face_mod.enhance(raw_full, norm, mask, strength=float(opts.get("face_strength", 1.0)))
+            if face_mode == "enhance":
+                raw_full = cv2.resize(d, (W, H), interpolation=cv2.INTER_CUBIC)
+                norm = face_mod.enhance(raw_full, norm, mask, strength=float(opts.get("face_strength", 1.0)))
+            else:
+                norm = face_mod.flatten(norm, mask)
         base = norm_to_bgr(norm, bool(opts.get("invert", True)), opts.get("colormap", "gray"))
     else:
         base = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
@@ -222,7 +226,8 @@ def run_job(jid, video_path: Path, opts: dict):
         invert = bool(opts.get("invert", True))
         colormap = opts.get("colormap", "gray")
         draw_face = bool(opts.get("draw_face", False))
-        enhance_face = bool(opts.get("enhance_face", False)) and need_depth
+        face_mode = opts.get("face_mode", "off")
+        need_face = face_mode in ("enhance", "flatten") and need_depth
         face_strength = float(opts.get("face_strength", 1.0))
 
         model = None
@@ -231,7 +236,7 @@ def run_job(jid, video_path: Path, opts: dict):
             model = get_model()
         if need_pose:
             estimator = pose_mod.PoseEstimator(complexity=int(opts.get("pose_complexity", 1)))
-        if enhance_face:
+        if need_face:
             face_det = face_mod.FaceDetector()
 
         raw_depths = []          # depth crudo por frame (resolución de proceso)
@@ -251,7 +256,7 @@ def run_job(jid, video_path: Path, opts: dict):
                 raw_depths.append(pred.depth[0].astype(np.float32))
             if need_pose:
                 pose_frames.append(estimator.detect(fr))
-            if enhance_face:
+            if need_face:
                 face_boxes.append(face_det.boxes(fr))
             upd(jid, done=idx + 1, message=f"procesando {idx+1}/{n}")
 
@@ -270,10 +275,13 @@ def run_job(jid, video_path: Path, opts: dict):
             # --- imagen base (BGR) ---
             if need_depth:
                 norm = depth_normalize(raw_depths[idx], W, H, lo, hi)
-                if enhance_face:
+                if need_face:
                     mask = face_mod.feather_mask(face_boxes[idx], W, H)
-                    raw_full = cv2.resize(raw_depths[idx], (W, H), interpolation=cv2.INTER_CUBIC)
-                    norm = face_mod.enhance(raw_full, norm, mask, strength=face_strength)
+                    if face_mode == "enhance":
+                        raw_full = cv2.resize(raw_depths[idx], (W, H), interpolation=cv2.INTER_CUBIC)
+                        norm = face_mod.enhance(raw_full, norm, mask, strength=face_strength)
+                    else:
+                        norm = face_mod.flatten(norm, mask)
                 base = norm_to_bgr(norm, invert, colormap)
             else:
                 base = cv2.cvtColor(frames[idx], cv2.COLOR_RGB2BGR)  # video original
@@ -340,7 +348,7 @@ async def preview(
     colormap: str = Form("gray"),
     pose_complexity: int = Form(1),
     draw_face: bool = Form(False),
-    enhance_face: bool = Form(False),
+    face_mode: str = Form("off"),
     face_strength: float = Form(1.0),
 ):
     if not video.filename:
@@ -356,7 +364,7 @@ async def preview(
         frame_rgb, idx, total = grab_frame(vpath, position)
         opts = dict(mode=mode, process_res=process_res, invert=invert,
                     colormap=colormap, pose_complexity=pose_complexity, draw_face=draw_face,
-                    enhance_face=enhance_face, face_strength=face_strength)
+                    face_mode=face_mode, face_strength=face_strength)
         bgr = render_single(frame_rgb, opts)
         ok, buf = cv2.imencode(".png", bgr)
         if not ok:
@@ -378,7 +386,7 @@ async def create_job(
     pose_complexity: int = Form(1),
     draw_face: bool = Form(False),
     include_audio: bool = Form(False),
-    enhance_face: bool = Form(False),
+    face_mode: str = Form("off"),
     face_strength: float = Form(1.0),
 ):
     if not video.filename:
@@ -401,7 +409,7 @@ async def create_job(
         "pose_complexity": pose_complexity,
         "draw_face": draw_face,
         "include_audio": include_audio,
-        "enhance_face": enhance_face,
+        "face_mode": face_mode,
         "face_strength": face_strength,
     }
     threading.Thread(target=run_job, args=(jid, vpath, opts), daemon=True).start()
